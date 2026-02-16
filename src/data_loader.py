@@ -32,8 +32,8 @@ class CryptoDataLoader:
             )
             df = pd.read_parquet(local_path)
             
-            df['open_time'] = pd.to_datetime(df['open_time'])
-            df['close_time'] = pd.to_datetime(df['close_time'])
+            df['open_time'] = pd.to_datetime(df['open_time'], utc=True)
+            df['close_time'] = pd.to_datetime(df['close_time'], utc=True)
             df = df.sort_values('open_time').reset_index(drop=True)
             df = df.drop_duplicates(subset=['open_time'], keep='last')
             
@@ -62,7 +62,7 @@ class CryptoDataLoader:
         """
         df = self.load_klines(symbol, timeframe)
         
-        current_time = datetime.now(pytz.UTC)
+        current_time = pd.Timestamp.now(tz='UTC')
         df = df[df['close_time'] < current_time]
         
         if start_date:
@@ -91,7 +91,7 @@ class CryptoDataLoader:
             Series containing the latest completed candle
         """
         df = self.load_klines(symbol, timeframe)
-        current_time = datetime.now(pytz.UTC)
+        current_time = pd.Timestamp.now(tz='UTC')
         
         completed = df[df['close_time'] < current_time]
         
