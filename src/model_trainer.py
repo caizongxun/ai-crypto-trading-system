@@ -9,6 +9,21 @@ import json
 import os
 from typing import Dict, Tuple, Optional
 
+class NumpyEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder for numpy types
+    """
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
+            return obj.isoformat()
+        return super().default(obj)
+
 class ModelTrainer:
     def __init__(self, model_dir: str = 'models'):
         self.model_dir = model_dir
@@ -92,6 +107,28 @@ class ModelTrainer:
             'tree_method': 'hist'
         }
     
+    def _convert_metrics_to_serializable(self, metrics: Dict) -> Dict:
+        """
+        Convert numpy types to Python native types for JSON serialization
+        
+        Args:
+            metrics: Dictionary with metrics
+            
+        Returns:
+            Dictionary with serializable types
+        """
+        serializable = {}
+        for key, value in metrics.items():
+            if isinstance(value, (np.integer, np.int32, np.int64)):
+                serializable[key] = int(value)
+            elif isinstance(value, (np.floating, np.float32, np.float64)):
+                serializable[key] = float(value)
+            elif isinstance(value, np.ndarray):
+                serializable[key] = value.tolist()
+            else:
+                serializable[key] = value
+        return serializable
+    
     def evaluate_model(self,
                       X_test: pd.DataFrame,
                       y_test: pd.Series,
@@ -116,13 +153,13 @@ class ModelTrainer:
         y_pred = (y_pred_proba >= threshold).astype(int)
         
         metrics = {
-            'accuracy': accuracy_score(y_test_binary, y_pred),
-            'precision': precision_score(y_test_binary, y_pred, zero_division=0),
-            'recall': recall_score(y_test_binary, y_pred, zero_division=0),
-            'f1': f1_score(y_test_binary, y_pred, zero_division=0),
-            'test_samples': len(y_test),
-            'positive_predictions': y_pred.sum(),
-            'positive_rate': y_pred.sum() / len(y_pred)
+            'accuracy': float(accuracy_score(y_test_binary, y_pred)),
+            'precision': float(precision_score(y_test_binary, y_pred, zero_division=0)),
+            'recall': float(recall_score(y_test_binary, y_pred, zero_division=0)),
+            'f1': float(f1_score(y_test_binary, y_pred, zero_division=0)),
+            'test_samples': int(len(y_test)),
+            'positive_predictions': int(y_pred.sum()),
+            'positive_rate': float(y_pred.sum() / len(y_pred))
         }
         
         self.metrics = metrics
@@ -192,10 +229,10 @@ class ModelTrainer:
                 scores[key].append(metrics[key])
         
         cv_results = {
-            f'{key}_mean': np.mean(values) for key, values in scores.items()
+            f'{key}_mean': float(np.mean(values)) for key, values in scores.items()
         }
         cv_results.update({
-            f'{key}_std': np.std(values) for key, values in scores.items()
+            f'{key}_std': float(np.std(values)) for key, values in scores.items()
         })
         
         return cv_results
@@ -238,18 +275,22 @@ class ModelTrainer:
         joblib.dump(model_data, model_path)
         
         metadata_path = os.path.join(self.model_dir, f"{model_name}_metadata.json")
+        
+        top_features = self.feature_importance.head(10).copy()
+        top_features['importance'] = top_features['importance'].astype(float)
+        
         metadata = {
             'symbol': symbol,
             'timeframe': timeframe,
             'version': version,
-            'metrics': self.metrics,
+            'metrics': self._convert_metrics_to_serializable(self.metrics),
             'trained_at': model_data['trained_at'],
-            'n_features': model_data['n_features'],
-            'top_10_features': self.feature_importance.head(10).to_dict('records')
+            'n_features': int(model_data['n_features']),
+            'top_10_features': top_features.to_dict('records')
         }
         
         with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            json.dump(metadata, f, indent=2, cls=NumpyEncoder)
         
         return model_path
     
