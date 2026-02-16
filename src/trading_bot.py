@@ -87,12 +87,12 @@ class TradingBot:
             self.logger.error(f"Error fetching OHLCV: {str(e)}")
             return pd.DataFrame()
     
-    def is_new_candle(self, current_candle_time: datetime) -> bool:
+    def is_new_candle(self, current_candle_time) -> bool:
         """
         Check if new candle has formed
         
         Args:
-            current_candle_time: Current candle timestamp
+            current_candle_time: Current candle timestamp (pd.Timestamp or datetime)
             
         Returns:
             True if new candle
@@ -101,7 +101,7 @@ class TradingBot:
             self.last_candle_time = current_candle_time
             return True
         
-        if current_candle_time > self.last_candle_time:
+        if pd.Timestamp(current_candle_time) > pd.Timestamp(self.last_candle_time):
             self.last_candle_time = current_candle_time
             return True
         
@@ -117,7 +117,7 @@ class TradingBot:
         Returns:
             DataFrame with completed candles only
         """
-        current_time = datetime.now(pytz.UTC)
+        current_time = pd.Timestamp.now(tz='UTC')
         completed = df[df['close_time'] < current_time].copy()
         return completed
     
@@ -148,7 +148,7 @@ class TradingBot:
             return {
                 'signal': signal,
                 'probability': probability,
-                'timestamp': datetime.now(pytz.UTC)
+                'timestamp': pd.Timestamp.now(tz='UTC')
             }
             
         except Exception as e:
@@ -209,11 +209,11 @@ class TradingBot:
         Execute paper trade (simulated)
         """
         position = {
-            'id': f"{self.symbol}_{datetime.now().timestamp()}",
+            'id': f"{self.symbol}_{pd.Timestamp.now().timestamp()}",
             'symbol': self.symbol,
             'direction': direction,
             'entry_price': price,
-            'entry_time': datetime.now(pytz.UTC),
+            'entry_time': pd.Timestamp.now(tz='UTC'),
             'size': size,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
@@ -250,7 +250,7 @@ class TradingBot:
                     'symbol': self.symbol,
                     'direction': direction,
                     'entry_price': order['average'],
-                    'entry_time': datetime.now(pytz.UTC),
+                    'entry_time': pd.Timestamp.now(tz='UTC'),
                     'size': size,
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
@@ -311,8 +311,11 @@ class TradingBot:
             elif current_price <= position['take_profit']:
                 return True, 'Take Profit'
         
-        holding_time = datetime.now(pytz.UTC) - position['entry_time']
-        if holding_time > timedelta(hours=24):
+        current_time = pd.Timestamp.now(tz='UTC')
+        entry_time = pd.Timestamp(position['entry_time'])
+        holding_time = current_time - entry_time
+        
+        if holding_time > pd.Timedelta(hours=24):
             return True, 'Max Holding Time'
         
         return False, ''
@@ -337,7 +340,7 @@ class TradingBot:
             'entry_price': position['entry_price'],
             'exit_price': exit_price,
             'entry_time': position['entry_time'],
-            'exit_time': datetime.now(pytz.UTC),
+            'exit_time': pd.Timestamp.now(tz='UTC'),
             'size': position['size'],
             'pnl': pnl,
             'pnl_percent': (pnl / position['size']) * 100,
