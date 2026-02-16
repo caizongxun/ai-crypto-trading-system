@@ -6,7 +6,7 @@ from src.rule_based_entry import RuleBasedEntry
 
 class RegimeBacktester:
     """
-    Backtester for regime-based trading system
+    Backtester for regime-based trading system with safe position sizing
     """
     
     def __init__(
@@ -22,6 +22,7 @@ class RegimeBacktester:
         self.slippage = slippage
         self.leverage = leverage
         self.risk_per_trade = risk_per_trade
+        self.max_position_pct = 0.95  # Max 95% of capital * leverage
         self.reset()
     
     def reset(self):
@@ -37,17 +38,6 @@ class RegimeBacktester:
         regimes: np.ndarray,
         regime_probas: np.ndarray
     ) -> Dict:
-        """
-        Run backtest with regime-based entries
-        
-        Args:
-            df: DataFrame with OHLCV + features
-            regimes: Predicted regimes for each candle
-            regime_probas: Regime probability distributions
-        
-        Returns:
-            Backtest metrics
-        """
         self.reset()
         entry_system = RuleBasedEntry()
         
@@ -66,12 +56,10 @@ class RegimeBacktester:
                 'regime': int(regimes[i]) if i < len(regimes) else -1
             })
             
-            # Check exit conditions for existing position
             if self.current_position is not None:
                 self._check_exit_conditions(row, ts)
             
-            # Generate new entry signal
-            if self.current_position is None and i + 1 < n:
+            if self.current_position is None and i + 1 < n and self.capital > 0:
                 regime = int(regimes[i])
                 regime_proba = regime_probas[i] if i < len(regime_probas) else np.zeros(5)
                 
@@ -95,7 +83,6 @@ class RegimeBacktester:
                         reason=signal_data['reason']
                     )
         
-        # Close any remaining position
         if self.current_position is not None:
             last_price = float(df.iloc[-1]['close'])
             last_ts = df.iloc[-1].get('open_time', n - 1)
@@ -113,23 +100,40 @@ class RegimeBacktester:
         entry_system: RuleBasedEntry,
         reason: str
     ):
+        if self.capital <= 0:
+            return
+        
         direction = 'long' if signal > 0 else 'short'
         
-        # Calculate stops based on regime
         stop_loss = entry_system.calculate_stop_loss(entry_price, atr, direction, regime)
         take_profit = entry_system.calculate_take_profit(entry_price, atr, direction, regime)
         
-        # Position sizing
+        # Calculate position size safely
         risk_amount = self.capital * self.risk_per_trade
         stop_distance = abs(entry_price - stop_loss)
         
-        if stop_distance <= 0:
+        if stop_distance <= 0 or not np.isfinite(stop_distance):
             return
         
-        position_notional = (risk_amount / stop_distance) * self.leverage
-        position_notional = min(position_notional, self.capital * self.leverage)
+        # Position value = risk amount / stop percentage
+        stop_pct = stop_distance / entry_price
+        if stop_pct <= 0 or not np.isfinite(stop_pct):
+            return
         
-        fees = position_notional * (self.commission + self.slippage)
+        position_value = (risk_amount / stop_pct) * self.leverage
+        
+        # Cap position size
+        max_position = self.capital * self.leverage * self.max_position_pct
+        position_value = min(position_value, max_position)
+        
+        # Final safety check
+        if position_value <= 0 or not np.isfinite(position_value):
+            return
+        
+        if position_value > self.capital * self.leverage * 2:  # Extreme case
+            return
+        
+        fees = position_value * (self.commission + self.slippage)
         if fees > self.capital:
             return
         
@@ -139,13 +143,14 @@ class RegimeBacktester:
             'direction': direction,
             'entry_price': float(entry_price),
             'entry_time': timestamp,
-            'size': float(position_notional),
+            'size': float(position_value),
             'stop_loss': float(stop_loss),
             'take_profit': float(take_profit),
             'regime': int(regime),
             'entry_reason': reason,
             'holding_periods': 0,
-            'atr': float(atr)
+            'atr': float(atr),
+            'risk_capital': float(position_value / self.leverage)  # Track actual capital at risk
         }
         
         self.regime_stats[regime]['entries'] += 1
@@ -161,7 +166,6 @@ class RegimeBacktester:
         low = float(row.get('low', 0))
         close = float(row.get('close', 0))
         
-        # Check stops
         if pos['direction'] == 'long':
             if low <= pos['stop_loss']:
                 self._exit_position(pos['stop_loss'], timestamp, 'Stop Loss')
@@ -177,7 +181,6 @@ class RegimeBacktester:
                 self._exit_position(pos['take_profit'], timestamp, 'Take Profit')
                 return
         
-        # Max holding period: 96 candles (24 hours on 15m)
         if pos['holding_periods'] >= 96:
             self._exit_position(close, timestamp, 'Max Holding Period')
     
@@ -186,17 +189,28 @@ class RegimeBacktester:
         if pos is None:
             return
         
+        # Calculate price movement percentage
         if pos['direction'] == 'long':
-            pnl = (exit_price - pos['entry_price']) * pos['size']
+            price_move_pct = (exit_price - pos['entry_price']) / pos['entry_price']
         else:
-            pnl = (pos['entry_price'] - exit_price) * pos['size']
+            price_move_pct = (pos['entry_price'] - exit_price) / pos['entry_price']
+        
+        # PnL = position size * price movement percentage
+        pnl = pos['size'] * price_move_pct
         
         fees = pos['size'] * (self.commission + self.slippage)
         pnl -= fees
         
-        self.capital += pnl + (pos['size'] / self.leverage)
+        # Update capital
+        self.capital += pnl
         
-        # Track regime stats
+        # Calculate PnL percentage based on risk capital
+        risk_capital = pos.get('risk_capital', pos['size'] / self.leverage)
+        pnl_percent = (pnl / risk_capital * 100) if risk_capital > 0 else 0.0
+        
+        # Clamp to reasonable range
+        pnl_percent = float(np.clip(pnl_percent, -100.0, 500.0))
+        
         regime = pos['regime']
         if pnl > 0:
             self.regime_stats[regime]['wins'] += 1
@@ -210,7 +224,7 @@ class RegimeBacktester:
             'exit_price': float(exit_price),
             'size': pos['size'],
             'pnl': float(pnl),
-            'pnl_percent': float((pnl / (pos['size'] / self.leverage)) * 100),
+            'pnl_percent': pnl_percent,
             'holding_periods': int(pos['holding_periods']),
             'regime': int(regime),
             'entry_reason': pos['entry_reason'],
@@ -243,25 +257,28 @@ class RegimeBacktester:
         wins = trades_df[trades_df['pnl'] > 0]
         losses = trades_df[trades_df['pnl'] < 0]
         
-        win_rate = float(len(wins) / len(trades_df) * 100)
+        win_rate = float(len(wins) / len(trades_df) * 100) if len(trades_df) > 0 else 0.0
         
-        total_wins = float(wins['pnl'].sum()) if len(wins) else 0.0
-        total_losses = float(abs(losses['pnl'].sum())) if len(losses) else 0.0
+        total_wins = float(wins['pnl'].sum()) if len(wins) > 0 else 0.0
+        total_losses = float(abs(losses['pnl'].sum())) if len(losses) > 0 else 0.0
         profit_factor = float(total_wins / total_losses) if total_losses > 0 else float('inf')
         
         cummax = equity_df['equity'].cummax()
         drawdown = (equity_df['equity'] - cummax) / cummax
-        max_drawdown = float(abs(drawdown.min()) * 100)
+        max_drawdown = float(abs(drawdown.min()) * 100) if len(drawdown) > 0 else 0.0
         
-        # Calculate regime-specific metrics
         regime_performance = {}
         for regime_id, stats in self.regime_stats.items():
             if stats['entries'] > 0:
+                regime_trades = trades_df[trades_df['regime'] == regime_id]
+                regime_wins = regime_trades[regime_trades['pnl'] > 0]
                 regime_performance[f'Regime_{regime_id}'] = {
                     'entries': stats['entries'],
                     'wins': stats['wins'],
                     'win_rate': float(stats['wins'] / stats['entries'] * 100),
-                    'total_pnl': float(stats['total_pnl'])
+                    'total_pnl': float(stats['total_pnl']),
+                    'avg_pnl': float(regime_trades['pnl'].mean()) if len(regime_trades) > 0 else 0.0,
+                    'avg_win': float(regime_wins['pnl'].mean()) if len(regime_wins) > 0 else 0.0
                 }
         
         return {
@@ -274,9 +291,9 @@ class RegimeBacktester:
             'win_rate': win_rate,
             'profit_factor': profit_factor,
             'max_drawdown': max_drawdown,
-            'avg_win': float(wins['pnl'].mean()) if len(wins) else 0.0,
-            'avg_loss': float(losses['pnl'].mean()) if len(losses) else 0.0,
-            'avg_holding_periods': float(trades_df['holding_periods'].mean()),
+            'avg_win': float(wins['pnl'].mean()) if len(wins) > 0 else 0.0,
+            'avg_loss': float(losses['pnl'].mean()) if len(losses) > 0 else 0.0,
+            'avg_holding_periods': float(trades_df['holding_periods'].mean()) if len(trades_df) > 0 else 0.0,
             'regime_performance': regime_performance,
             'trades_df': trades_df,
             'equity_df': equity_df
